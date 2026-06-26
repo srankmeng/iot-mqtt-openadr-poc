@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { XMLParser } from 'fast-xml-parser';
-import { DrEvent, OadrEventStatus, OadrSignalName, ParsedOadrMessage } from './oadr.types';
+import { DrEvent, OadrEventStatus, OadrSignalName, ParsedOadrMessage, VenAck } from './oadr.types';
 
 const OADR_NS = `xmlns:oadr="http://openadr.org/oadr-2.0b/2012/07"
              xmlns:ei="http://docs.oasis-open.org/ns/energyinterop/201110"
@@ -67,5 +67,82 @@ export class OadrXmlService {
     </oadr:oadrRequestEvent>
   </oadr:oadrSignedObject>
 </oadrPayload>`;
+  }
+
+  // VTN → VEN outbound: distribute one or more DR events
+  buildDistributeEvent(vtnID: string, requestID: string, events: DrEvent[]): string {
+    const eiEvents = events.map((e) => `
+      <ei:eiEvent>
+        <ei:eventDescriptor>
+          <ei:eventID>${e.eventID}</ei:eventID>
+          <ei:modificationNumber>${e.modificationNumber}</ei:modificationNumber>
+          <ei:eventStatus>${e.eventStatus}</ei:eventStatus>
+          <ei:testEvent>${e.testEvent}</ei:testEvent>
+          ${e.vtnComment ? `<ei:vtnComment>${e.vtnComment}</ei:vtnComment>` : ''}
+        </ei:eventDescriptor>
+        <ei:eiActivePeriod>
+          <xcal:properties>
+            <xcal:dtstart><xcal:date-time>${e.dtstart}</xcal:date-time></xcal:dtstart>
+            <xcal:duration><xcal:duration>${e.duration}</xcal:duration></xcal:duration>
+          </xcal:properties>
+        </ei:eiActivePeriod>
+        <ei:eiEventSignals>
+          <ei:eiEventSignal>
+            <ei:signalName>${e.signalName}</ei:signalName>
+            <ei:currentValue>
+              <ei:payloadFloat><ei:value>${e.signalLevel}</ei:value></ei:payloadFloat>
+            </ei:currentValue>
+          </ei:eiEventSignal>
+        </ei:eiEventSignals>
+      </ei:eiEvent>`).join('');
+
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<oadr:oadrPayload ${OADR_NS}>
+  <oadr:oadrSignedObject>
+    <oadr:oadrDistributeEvent>
+      <ei:requestID>${requestID}</ei:requestID>
+      <ei:vtnID>${vtnID}</ei:vtnID>
+      ${eiEvents}
+    </oadr:oadrDistributeEvent>
+  </oadr:oadrSignedObject>
+</oadr:oadrPayload>`;
+  }
+
+  // VTN ACK sent back to VEN after receiving oadrCreatedEvent
+  buildOadrResponse(requestID: string, responseCode: number, description: string): string {
+    return `<?xml version="1.0" encoding="UTF-8"?>
+<oadr:oadrPayload ${OADR_NS}>
+  <oadr:oadrSignedObject>
+    <oadr:oadrResponse>
+      <ei:eiResponse>
+        <ei:requestID>${requestID}</ei:requestID>
+        <ei:responseCode>${responseCode}</ei:responseCode>
+        <ei:responseDescription>${description}</ei:responseDescription>
+      </ei:eiResponse>
+    </oadr:oadrResponse>
+  </oadr:oadrSignedObject>
+</oadr:oadrPayload>`;
+  }
+
+  // Parse oadrCreatedEvent sent by VEN as acknowledgment
+  extractCreatedEvent(raw: any): VenAck {
+    const created = raw?.eiCreatedEvent ?? raw;
+    const rawResponses = created?.eventResponses?.eventResponse ?? [];
+    const responses = (Array.isArray(rawResponses) ? rawResponses : [rawResponses])
+      .filter(Boolean)
+      .map((r: any) => ({
+        eventID:            String(r?.qualifiedEventID?.eventID ?? r?.eventID ?? ''),
+        modificationNumber: Number(r?.qualifiedEventID?.modificationNumber ?? 0),
+        optType:            (r?.optType ?? 'optIn') as 'optIn' | 'optOut',
+        responseCode:       Number(r?.responseCode ?? 200),
+        responseDescription: String(r?.responseDescription ?? 'OK'),
+      }));
+
+    return {
+      venID:      String(created?.venID ?? ''),
+      requestID:  String(created?.requestID ?? ''),
+      responses,
+      receivedAt: new Date().toISOString(),
+    };
   }
 }

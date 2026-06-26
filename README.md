@@ -12,12 +12,21 @@
 ║         │  PUSH → POST /oadr/push                                ║
 ║         │  PULL → openadr-bridge polls VTN every 30s            ║
 ║         ▼                                                        ║
-║   ┌──────────────────┐                                           ║
-║   │  openadr-bridge  │  :4003  converts OpenADR XML → JSON      ║
-║   └────────┬─────────┘                                           ║
-║            │ produce                                             ║
-║            ▼                                                     ║
-║   ┌─────────────┐                                                ║
+║   ┌──────────────────────────────────────────┐                   ║
+║   │           openadr-bridge  :4003          │                   ║
+║   │                                          │                   ║
+║   │   VEN (upstream client)                  │                   ║
+║   │   • polls / receives from Utility VTN    │                   ║
+║   │   • converts OpenADR XML → JSON → Kafka  │                   ║
+║   │                                          │                   ║
+║   │   VTN (downstream server)                │                   ║
+║   │   • accepts poll / ACK from field VENs   │                   ║
+║   │   • pushes oadrDistributeEvent outbound  │                   ║
+║   │   • receives oadrCreatedEvent ACKs       │                   ║
+║   └────────┬────────────────────┬────────────┘                   ║
+║            │ produce            │ push XML                       ║
+║            ▼                    ▼                                ║
+║   ┌─────────────┐       Field VEN(s)                             ║
 ║   │    Kafka    │  port 9092  (topic: iot.dr_events)            ║
 ║   └──────┬──────┘                                                ║
 ║          │ consume                                               ║
@@ -70,20 +79,40 @@
 ╚═════════════════════════════════════════════════════════════════╝
 ```
 
-### OpenADR 2.0b – How openadr-bridge receives signals
+---
 
-openadr-bridge acts as a **VEN (Virtual End Node)** — it only receives inbound DR signals from the upstream utility VTN.
+## OpenADR 2.0b – openadr-bridge as VEN and VTN
 
-**PUSH** (VTN calls us):
+`openadr-bridge` runs in **dual role**: it acts as a VEN toward the upstream utility VTN, and as a VTN toward any downstream field VENs.
+
+### Inbound (VEN mode) — receiving DR signals from upstream
+
+**PUSH** (upstream VTN calls us):
 ```
 Utility VTN  ──POST /oadr/push──▶  openadr-bridge  ──▶  Kafka iot.dr_events
 ```
 
-**PULL** (we call VTN every 30 s, when `UPSTREAM_VTN_URL` is set):
+**PULL** (we poll upstream VTN every 30 s, when `UPSTREAM_VTN_URL` is set):
 ```
 openadr-bridge  ──oadrRequestEvent──▶  Utility VTN
 openadr-bridge  ◀──oadrDistributeEvent──  Utility VTN
 openadr-bridge  ──▶  Kafka iot.dr_events
+```
+
+### Outbound (VTN mode) — distributing DR signals to downstream VENs
+
+**PUSH** (we call each registered VEN):
+```
+openadr-bridge  ──oadrDistributeEvent──▶  Field VEN
+openadr-bridge  ◀──oadrCreatedEvent (ACK)──  Field VEN   (optional)
+```
+
+**PULL** (field VEN polls us):
+```
+Field VEN  ──oadrRequestEvent──▶  POST /vtn/EiEvent
+Field VEN  ◀──oadrDistributeEvent──  openadr-bridge
+Field VEN  ──oadrCreatedEvent (ACK)──▶  POST /vtn/EiEvent
+Field VEN  ◀──oadrResponse──  openadr-bridge
 ```
 
 ### SIMPLE signal levels
@@ -110,6 +139,7 @@ open http://localhost:8080    # Kafka UI
 curl http://localhost:4001/devices/health
 curl http://localhost:4002/telemetry/health
 curl http://localhost:4003/oadr/health
+curl http://localhost:4003/vtn/health
 ```
 
 ---
@@ -141,7 +171,7 @@ mosquitto_sub -h localhost -p 1883 -t "devices/sensor-001/ack"
 
 ## Simulate OpenADR 2.0b DR Signal
 
-### Inject a signal via PUSH (simulates utility VTN calling openadr-bridge)
+### Inbound: inject a signal via PUSH (simulates upstream utility VTN calling us)
 
 ```bash
 curl -X POST http://localhost:4003/oadr/push \
@@ -193,12 +223,108 @@ curl -X POST http://localhost:4003/oadr/push \
 </oadrPayload>'
 ```
 
-openadr-bridge will parse the XML, store the event, and publish it to Kafka `iot.dr_events`.
-
-### Check received DR events
+openadr-bridge parses the XML, stores the event, and publishes it to Kafka `iot.dr_events`.
 
 ```bash
+# Check received DR events
 curl http://localhost:4003/oadr/events
+```
+
+---
+
+### Outbound: send a DR signal to downstream VENs (VTN mode)
+
+**Step 1 — Register a downstream VEN** (its push URL is where we will POST `oadrDistributeEvent`):
+
+```bash
+curl -X POST http://localhost:4003/vtn/vens \
+  -H "Content-Type: application/json" \
+  -d '{"venID": "VEN-SITE-A", "pushUrl": "http://site-a-ven:3000/oadr/push"}'
+```
+
+**Step 2 — Distribute an event to all registered VENs** (updates current event state and pushes immediately):
+
+```bash
+curl -X POST http://localhost:4003/vtn/events/distribute \
+  -H "Content-Type: application/json" \
+  -d '{
+    "eventID": "EVT-VTN-002",
+    "eventStatus": "active",
+    "signalName": "SIMPLE",
+    "signalLevel": 2,
+    "dtstart": "2026-06-26T10:00:00Z",
+    "duration": "PT2H",
+    "testEvent": false,
+    "vtnComment": "Peak demand reduction signal"
+  }'
+```
+
+**Step 3 — Re-push current event** (without changing it):
+
+```bash
+curl -X POST http://localhost:4003/vtn/events/push
+```
+
+**Inspect VTN state:**
+
+```bash
+# Registered VENs
+curl http://localhost:4003/vtn/vens
+
+# Current event being distributed
+curl http://localhost:4003/vtn/events/current
+
+# oadrCreatedEvent ACKs received from VENs
+curl http://localhost:4003/vtn/acks
+```
+
+**Simulate a field VEN polling the VTN** (VEN sends `oadrRequestEvent`, receives `oadrDistributeEvent`):
+
+```bash
+curl -X POST http://localhost:4003/vtn/EiEvent \
+  -H "Content-Type: application/xml" \
+  -d '<?xml version="1.0" encoding="UTF-8"?>
+<oadrPayload xmlns:oadr="http://openadr.org/oadr-2.0b/2012/07"
+             xmlns:ei="http://docs.oasis-open.org/ns/energyinterop/201110">
+  <oadr:oadrSignedObject>
+    <oadr:oadrRequestEvent>
+      <ei:eiRequestEvent>
+        <requestID xmlns="http://docs.oasis-open.org/ns/energyinterop/201110/payloads">req-001</requestID>
+        <ei:venID>VEN-SITE-A</ei:venID>
+        <ei:replyLimit>10</ei:replyLimit>
+      </ei:eiRequestEvent>
+    </oadr:oadrRequestEvent>
+  </oadr:oadrSignedObject>
+</oadrPayload>'
+```
+
+**Simulate a field VEN sending `oadrCreatedEvent` ACK to the VTN** (VTN responds with `oadrResponse`):
+
+```bash
+curl -X POST http://localhost:4003/vtn/EiEvent \
+  -H "Content-Type: application/xml" \
+  -d '<?xml version="1.0" encoding="UTF-8"?>
+<oadrPayload xmlns:oadr="http://openadr.org/oadr-2.0b/2012/07"
+             xmlns:ei="http://docs.oasis-open.org/ns/energyinterop/201110">
+  <oadr:oadrSignedObject>
+    <oadr:oadrCreatedEvent>
+      <ei:eiCreatedEvent>
+        <ei:venID>VEN-SITE-A</ei:venID>
+        <ei:requestID>req-001</ei:requestID>
+        <ei:eventResponses>
+          <ei:eventResponse>
+            <ei:responseCode>200</ei:responseCode>
+            <ei:qualifiedEventID>
+              <ei:eventID>EVT-VTN-002</ei:eventID>
+              <ei:modificationNumber>1</ei:modificationNumber>
+            </ei:qualifiedEventID>
+            <ei:optType>optIn</ei:optType>
+          </ei:eventResponse>
+        </ei:eventResponses>
+      </ei:eiCreatedEvent>
+    </oadr:oadrCreatedEvent>
+  </oadr:oadrSignedObject>
+</oadrPayload>'
 ```
 
 ---
@@ -209,7 +335,7 @@ curl http://localhost:4003/oadr/events
 |---|---|---|
 | `iot.telemetry` | mqtt-bridge | Sensor readings |
 | `iot.events` | mqtt-bridge | Device alerts / events |
-| `iot.dr_events` | openadr-bridge | DR signals received from utility VTN |
+| `iot.dr_events` | openadr-bridge | DR signals received from upstream utility VTN |
 
 ## REST Endpoints
 
@@ -220,9 +346,17 @@ curl http://localhost:4003/oadr/events
 | ms-device | POST | `/devices/:id/command` | Send MQTT command to device |
 | ms-telemetry | GET | `/telemetry` | Recent records (newest first, max 500) |
 | ms-telemetry | GET | `/telemetry/health` | Health check |
-| openadr-bridge | POST | `/oadr/push` | Receive DR signal from upstream VTN (PUSH) |
-| openadr-bridge | GET | `/oadr/events` | View all received DR events (JSON) |
+| openadr-bridge | POST | `/oadr/push` | **VEN** — receive DR signal from upstream VTN (PUSH) |
+| openadr-bridge | GET | `/oadr/events` | **VEN** — view all received DR events (JSON) |
 | openadr-bridge | GET | `/oadr/health` | Health check |
+| openadr-bridge | POST | `/vtn/EiEvent` | **VTN** — field VEN polls (`oadrRequestEvent`) or sends ACK (`oadrCreatedEvent`) |
+| openadr-bridge | POST | `/vtn/vens` | **VTN** — register a downstream VEN `{venID, pushUrl}` |
+| openadr-bridge | GET | `/vtn/vens` | **VTN** — list registered downstream VENs |
+| openadr-bridge | POST | `/vtn/events/distribute` | **VTN** — update current event and push to all VENs |
+| openadr-bridge | POST | `/vtn/events/push` | **VTN** — re-push current event to all VENs |
+| openadr-bridge | GET | `/vtn/events/current` | **VTN** — inspect current event state |
+| openadr-bridge | GET | `/vtn/acks` | **VTN** — view `oadrCreatedEvent` ACKs received from VENs |
+| openadr-bridge | GET | `/vtn/health` | **VTN** — health check |
 
 ## Environment Variables
 
@@ -233,8 +367,101 @@ curl http://localhost:4003/oadr/events
 | `KAFKA_TOPIC_TELEMETRY` | `iot.telemetry` | mqtt-bridge, ms-device, ms-telemetry |
 | `KAFKA_TOPIC_EVENTS` | `iot.events` | mqtt-bridge, ms-telemetry |
 | `KAFKA_TOPIC_DR_EVENTS` | `iot.dr_events` | openadr-bridge |
-| `OADR_VEN_ID` | `VEN-EGAT-PLATFORM` | openadr-bridge |
-| `UPSTREAM_VTN_URL` | _(empty — PULL disabled)_ | openadr-bridge |
+| `OADR_VEN_ID` | `VEN-EGAT-PLATFORM` | openadr-bridge (VEN mode) |
+| `OADR_VTN_ID` | `VTN-EGAT-PLATFORM` | openadr-bridge (VTN mode) |
+| `UPSTREAM_VTN_URL` | _(empty — PULL disabled)_ | openadr-bridge (VEN mode) |
+
+---
+
+## Mock VEN — simulate a downstream field VEN
+
+`mock-ven/` is a minimal Express service that acts as an OpenADR VEN for local testing. It receives pushed events, sends `oadrCreatedEvent` ACKs, and can poll the VTN on demand.
+
+### Start it
+
+Uncomment `mock-ven` in `docker-compose.yml`, then:
+
+```bash
+docker compose up --build mock-ven
+```
+
+Or run standalone (pointing at openadr-bridge on the host):
+
+```bash
+cd mock-ven
+npm install
+VEN_ID=VEN-MOCK-001 VTN_URL=http://localhost:4003 node index.js
+# listening on :3000
+```
+
+### Register it with the VTN
+
+```bash
+curl -X POST http://localhost:4003/vtn/vens \
+  -H "Content-Type: application/json" \
+  -d '{"venID": "VEN-MOCK-001", "pushUrl": "http://localhost:3000/oadr/push"}'
+```
+
+When running via Docker Compose, use the internal hostname:
+
+```bash
+curl -X POST http://localhost:4003/vtn/vens \
+  -H "Content-Type: application/json" \
+  -d '{"venID": "VEN-MOCK-001", "pushUrl": "http://mock-ven:3000/oadr/push"}'
+```
+
+### Simulate a PUSH (VTN → VEN)
+
+Trigger the VTN to push the current event to all registered VENs:
+
+```bash
+curl -X POST http://localhost:4003/vtn/events/push
+```
+
+The mock-ven receives `oadrDistributeEvent`, stores it, and responds inline with `oadrCreatedEvent` (optIn). Confirm in mock-ven logs and via:
+
+```bash
+curl http://localhost:3000/admin/events   # events received by the mock VEN
+curl http://localhost:4003/vtn/acks       # ACKs received by the VTN
+```
+
+### Simulate a PULL (VEN polls VTN)
+
+The mock-ven polls the VTN's `/vtn/EiEvent` endpoint, then sends back `oadrCreatedEvent`:
+
+```bash
+curl -X POST http://localhost:3000/admin/poll
+```
+
+### Change optIn / optOut on the fly
+
+```bash
+curl -X PUT http://localhost:3000/admin/opttype \
+  -H "Content-Type: application/json" \
+  -d '{"optType": "optOut"}'
+```
+
+### Mock VEN endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `POST` | `/oadr/push` | Receive `oadrDistributeEvent` from VTN; responds with `oadrCreatedEvent` |
+| `POST` | `/admin/poll` | Poll VTN for events and send ACK |
+| `GET` | `/admin/events` | View all received DR events |
+| `DELETE` | `/admin/events` | Clear stored events |
+| `PUT` | `/admin/opttype` | Switch response between `optIn` and `optOut` |
+| `GET` | `/health` | Health check |
+
+### Mock VEN environment variables
+
+| Variable | Default | Description |
+|---|---|---|
+| `VEN_ID` | `VEN-MOCK-001` | VEN identity sent in ACK messages |
+| `VTN_URL` | `http://localhost:4003` | Base URL of the VTN (`/vtn/EiEvent` is appended) |
+| `OPT_TYPE` | `optIn` | Default ACK response (`optIn` or `optOut`) |
+| `PORT` | `3000` | HTTP port |
+
+---
 
 ## Next Steps (Production)
 

@@ -54,3 +54,22 @@ export interface ParsedOadrMessage {
     | 'unknown';
   raw: any;
 }
+
+export interface RegisteredVen {
+  venID: string;
+  pushUrl: string;
+  registeredAt: string;
+}
+
+export interface VenAck {
+  venID: string;
+  requestID: string;
+  responses: Array<{
+    eventID: string;
+    modificationNumber: number;
+    optType: 'optIn' | 'optOut';
+    responseCode: number;
+    responseDescription: string;
+  }>;
+  receivedAt: string;
+}

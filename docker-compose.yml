@@ -173,6 +173,35 @@ services:
   #   restart: unless-stopped
 
   # ─────────────────────────────────────────
+  # Mock VEN (OpenADR 2.0b — local testing)
+  #   POST /oadr/push      ← VTN pushes oadrDistributeEvent here
+  #   POST /admin/poll     ← trigger VEN to poll openadr-bridge VTN
+  #   GET  /admin/events   ← inspect received events
+  #   PUT  /admin/opttype  ← switch optIn / optOut on the fly
+  #
+  # Enable by uncommenting, then register with openadr-bridge VTN:
+  #   curl -X POST http://localhost:4003/vtn/vens \
+  #     -H "Content-Type: application/json" \
+  #     -d '{"venID":"VEN-MOCK-001","pushUrl":"http://mock-ven:3000/oadr/push"}'
+  # ─────────────────────────────────────────
+  # mock-ven:
+  #   build:
+  #     context: ./mock-ven
+  #     dockerfile: Dockerfile
+  #   container_name: mock-ven
+  #   ports:
+  #     - "4011:3000"
+  #   environment:
+  #     VEN_ID: VEN-MOCK-001
+  #     VTN_URL: http://openadr-bridge:3000
+  #     OPT_TYPE: optIn     # optIn | optOut
+  #   depends_on:
+  #     - openadr-bridge
+  #   networks:
+  #     - iot-net
+  #   restart: unless-stopped
+
+  # ─────────────────────────────────────────
   # OpenADR 2.0b Bridge (NestJS)
   #   Receives DR signals from upstream utility VTN
   #   and publishes them to Kafka iot.dr_events / iot.dr_reports
