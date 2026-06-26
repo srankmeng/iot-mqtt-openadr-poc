@@ -7,6 +7,7 @@ networks:
 volumes:
   kafka-data:
   emqx-data:
+  timescaledb-data:
 
 services:
   # ─────────────────────────────────────────
@@ -83,6 +84,29 @@ services:
     restart: unless-stopped
 
   # ─────────────────────────────────────────
+  # TimescaleDB (PostgreSQL + time-series)
+  # ─────────────────────────────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: timescaledb
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: egat
+      POSTGRES_PASSWORD: egat_secret
+      POSTGRES_DB: egat_telemetry
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+    networks:
+      - iot-net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U egat -d egat_telemetry"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ─────────────────────────────────────────
   # MQTT → Kafka Bridge (Node.js)
   # ─────────────────────────────────────────
   mqtt-bridge:
@@ -143,6 +167,8 @@ services:
         condition: service_healthy
       emqx:
         condition: service_healthy
+      timescaledb:
+        condition: service_healthy
     ports:
       - "4002:3000"
     environment:
@@ -152,6 +178,11 @@ services:
       KAFKA_TOPIC_TELEMETRY: iot.telemetry
       KAFKA_TOPIC_EVENTS: iot.events
       MQTT_BROKER_URL: mqtt://emqx:1883
+      DB_HOST: timescaledb
+      DB_PORT: "5432"
+      DB_USER: egat
+      DB_PASSWORD: egat_secret
+      DB_NAME: egat_telemetry
     networks:
       - iot-net
     restart: unless-stopped

@@ -1,37 +1,37 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { TelemetryRecord } from './telemetry.entity';
 import { MqttPublisherService } from '../mqtt/mqtt-publisher.service';
 
-interface TelemetryRecord {
-  id: string;
-  type: 'telemetry' | 'event';
-  deviceId: string;
-  receivedAt: string;
-  payload: any;
-}
-
 @Injectable()
-export class TelemetryService {
+export class TelemetryService implements OnModuleInit {
   private readonly logger = new Logger(TelemetryService.name);
-  // In-memory ring buffer (last 500 records) – swap with TimescaleDB/InfluxDB
-  private readonly records: TelemetryRecord[] = [];
-  private readonly MAX_RECORDS = 500;
 
-  constructor(private readonly mqttPublisher: MqttPublisherService) {}
+  constructor(
+    @InjectRepository(TelemetryRecord)
+    private readonly repo: Repository<TelemetryRecord>,
+    private readonly dataSource: DataSource,
+    private readonly mqttPublisher: MqttPublisherService,
+  ) {}
+
+  async onModuleInit() {
+    await this.dataSource.query(`CREATE EXTENSION IF NOT EXISTS timescaledb;`);
+    await this.dataSource.query(`
+      SELECT create_hypertable('telemetry_records', 'received_at', if_not_exists => TRUE);
+    `);
+    this.logger.log('TimescaleDB hypertable ready');
+  }
 
   async store(message: any, type: 'telemetry' | 'event'): Promise<void> {
-    const record: TelemetryRecord = {
-      id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    const record = this.repo.create({
       type,
       deviceId: message?.deviceId ?? 'unknown',
-      receivedAt: new Date().toISOString(),
+      receivedAt: new Date(),
       payload: message?.payload ?? message,
-    };
+    });
 
-    this.records.push(record);
-    if (this.records.length > this.MAX_RECORDS) {
-      this.records.shift();
-    }
-
+    await this.repo.save(record);
     this.logger.log(`[TelemetryService] Stored ${type} from ${record.deviceId}`);
 
     this.mqttPublisher.publish(`devices/${record.deviceId}/ack`, {
@@ -41,7 +41,10 @@ export class TelemetryService {
     });
   }
 
-  getAll(): TelemetryRecord[] {
-    return [...this.records].reverse(); // newest first
+  async getAll(): Promise<TelemetryRecord[]> {
+    return this.repo.find({
+      order: { receivedAt: 'DESC' },
+      take: 500,
+    });
   }
 }

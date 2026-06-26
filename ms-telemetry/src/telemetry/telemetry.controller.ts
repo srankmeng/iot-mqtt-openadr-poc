@@ -25,7 +25,7 @@ export class TelemetryController {
 
   // ── REST endpoints ──────────────────────────────────────────────────────
   @Get()
-  getRecords() {
+  async getRecords() {
     return this.telemetryService.getAll();
   }
 
