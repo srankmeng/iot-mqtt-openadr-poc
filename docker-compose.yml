@@ -157,6 +157,22 @@ services:
     restart: unless-stopped
 
   # ─────────────────────────────────────────
+  # Mock VTN (OpenADR 2.0b — local testing)
+  #   POST /EiEvent        ← VEN polls here
+  #   PUT  /admin/event    ← change DR signal on the fly
+  # ─────────────────────────────────────────
+  # mock-vtn:
+  #   build:
+  #     context: ./mock-vtn
+  #     dockerfile: Dockerfile
+  #   container_name: mock-vtn
+  #   ports:
+  #     - "4010:3000"
+  #   networks:
+  #     - iot-net
+  #   restart: unless-stopped
+
+  # ─────────────────────────────────────────
   # OpenADR 2.0b Bridge (NestJS)
   #   Receives DR signals from upstream utility VTN
   #   and publishes them to Kafka iot.dr_events / iot.dr_reports
@@ -169,6 +185,8 @@ services:
     depends_on:
       kafka:
         condition: service_healthy
+      # mock-vtn:
+      #   condition: service_started
     ports:
       - "4003:3000"
     environment:
@@ -176,11 +194,9 @@ services:
       KAFKA_BROKERS: kafka:29092
       KAFKA_TOPIC_DR_EVENTS: iot.dr_events
       KAFKA_TOPIC_DR_REPORTS: iot.dr_reports
-      # Our VEN identity registered with the upstream utility VTN
       OADR_VEN_ID: VEN-EGAT-PLATFORM
-      # Upstream VTN base URL — leave empty to use PUSH only (no polling)
-      # Example: UPSTREAM_VTN_URL=http://egat-vtn.example.com/OpenADR2/Simple/2.0b
-      UPSTREAM_VTN_URL: ""
+      # Points to the mock VTN inside Docker network
+      # UPSTREAM_VTN_URL: "http://mock-vtn:3000"
     networks:
       - iot-net
     restart: unless-stopped
