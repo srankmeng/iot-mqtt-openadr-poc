@@ -1,9 +1,10 @@
-import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';
+import { Entity, Column, PrimaryColumn } from 'typeorm';
+import { v4 as uuidv4 } from 'uuid';
 
 @Entity('telemetry_records')
 export class TelemetryRecord {
-  @PrimaryGeneratedColumn('uuid')
-  id: string;
+  @PrimaryColumn({ type: 'uuid', default: () => 'gen_random_uuid()' })
+  id: string = uuidv4();
 
   @Column({ type: 'varchar', length: 50 })
   type: 'telemetry' | 'event';
@@ -11,7 +12,7 @@ export class TelemetryRecord {
   @Column({ name: 'device_id', type: 'varchar', length: 255 })
   deviceId: string;
 
-  @Column({ name: 'received_at', type: 'timestamptz' })
+  @PrimaryColumn({ name: 'received_at', type: 'timestamptz' })
   receivedAt: Date;
 
   @Column({ type: 'jsonb' })
